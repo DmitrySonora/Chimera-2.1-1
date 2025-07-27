@@ -16,6 +16,7 @@ from utils.monitoring import measure_latency
 from utils.circuit_breaker import CircuitBreaker
 from utils.event_utils import EventVersionManager
 from models.structured_responses import parse_response
+from pydantic import ValidationError
 
 # Проверка наличия OpenAI SDK
 try:
@@ -464,18 +465,36 @@ class GenerationActor(BaseActor):
             # Если дошли сюда - валидация успешна
             return True, []
             
-        except ValueError as e:
-            # Парсим ошибки Pydantic
+        except ValidationError as e:
+            # Парсим ошибки Pydantic напрямую
             errors = []
             
-            if hasattr(e, '__cause__') and hasattr(e.__cause__, 'errors'):
-                # Pydantic ValidationError
+            for error in e.errors():
+                field = '.'.join(str(x) for x in error['loc'])
+                msg = error['msg']
+                errors.append(f"{field}: {msg}")
+            
+            # Ограничиваем количество ошибок
+            from config.prompts import JSON_VALIDATION_CONFIG
+            max_errors = JSON_VALIDATION_CONFIG.get('max_validation_errors', 5)
+            if len(errors) > max_errors:
+                errors = errors[:max_errors] + [f"... and {len(errors) - max_errors} more errors"]
+            
+            return False, errors
+            
+        except ValueError as e:
+            # Другие ошибки (например, от parse_response при невалидном JSON)
+            errors = []
+            
+            # Проверяем, есть ли ValidationError в цепочке причин
+            if hasattr(e, '__cause__') and isinstance(e.__cause__, ValidationError):
+                # Если parse_response обернул ValidationError в ValueError
                 for error in e.__cause__.errors():
                     field = '.'.join(str(x) for x in error['loc'])
                     msg = error['msg']
                     errors.append(f"{field}: {msg}")
             else:
-                # Другие ошибки
+                # Другие ValueError (например, невалидный JSON)
                 errors.append(str(e))
             
             # Ограничиваем количество ошибок
